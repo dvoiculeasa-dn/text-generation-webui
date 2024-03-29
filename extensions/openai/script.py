@@ -61,14 +61,18 @@ params = {
 streaming_semaphore = asyncio.Semaphore(1)
 
 
-def verify_api_key(authorization: str = Header(None)) -> None:
+def verify_api_key(api_key: str = Header(None), authorization: str = Header(None)) -> None:
     expected_api_key = shared.args.api_key
+    if authorization is None:
+        authorization = f"Bearer {api_key}"
     if expected_api_key and (authorization is None or authorization != f"Bearer {expected_api_key}"):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
 
-def verify_admin_key(authorization: str = Header(None)) -> None:
+def verify_admin_key(api_key: str = Header(None), authorization: str = Header(None)) -> None:
     expected_api_key = shared.args.admin_key
+    if authorization is None:
+        authorization = f"Bearer {api_key}"
     if expected_api_key and (authorization is None or authorization != f"Bearer {expected_api_key}"):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
