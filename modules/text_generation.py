@@ -77,6 +77,7 @@ def _generate_reply(question, state, stopping_strings=None, is_chat=False, escap
     last_update = -1
     reply = ''
     is_stream = state['stream']
+    original_state = state
     if len(all_stop_strings) > 0 and not state['stream']:
         state = copy.deepcopy(state)
         state['stream'] = True
@@ -88,6 +89,8 @@ def _generate_reply(question, state, stopping_strings=None, is_chat=False, escap
     # Generate
     for reply in generate_func(question, original_question, seed, state, stopping_strings, is_chat=is_chat):
         reply, stop_found = apply_stopping_strings(reply, all_stop_strings)
+        # TODO, cleaner. This is just a hack to feed back the confidence
+        original_state['confidence_calculator'] = state.get('confidence_calculator')
         if escape_html:
             reply = html.escape(reply)
         if is_stream:
@@ -372,16 +375,23 @@ def generate_reply_HF(question, original_question, seed, state, stopping_strings
         shared.model.save_cache()
 
     t0 = time.time()
+    output_for_confidence = None
     try:
         if not is_chat and not shared.is_seq2seq:
+            print('Yielding empty string')
             yield ''
 
         # Generate the entire reply at once.
         if not state['stream']:
             with torch.no_grad():
+                # TODO move this outside, see each individually
+                generate_params['output_scores'] = True
+                generate_params['return_dict_in_generate'] = True
+
                 output = shared.model.generate(**generate_params)[0]
                 if cuda:
                     output = output.cuda()
+                output_for_confidence = output
 
             starting_from = 0 if shared.is_seq2seq else len(input_ids[0])
             yield get_reply_from_output_ids(output, state, starting_from=starting_from)
@@ -389,12 +399,16 @@ def generate_reply_HF(question, original_question, seed, state, stopping_strings
         # Stream the reply 1 token at a time.
         # This is based on the trick of using 'stopping_criteria' to create an iterator.
         else:
+            # TODO move this outside, see each individually
+            generate_params['output_scores'] = True
+            generate_params['return_dict_in_generate'] = True
 
             def generate_with_callback(callback=None, *args, **kwargs):
                 kwargs['stopping_criteria'].append(Stream(callback_func=callback))
                 clear_torch_cache()
                 with torch.no_grad():
-                    shared.model.generate(**kwargs)
+                    nonlocal output_for_confidence
+                    output_for_confidence = shared.model.generate(**kwargs)
 
             def generate_with_streaming(**kwargs):
                 return Iteratorize(generate_with_callback, [], kwargs, callback=None)
@@ -421,7 +435,18 @@ def generate_reply_HF(question, original_question, seed, state, stopping_strings
         t1 = time.time()
         original_tokens = len(original_input_ids[0])
         new_tokens = len(output) - (original_tokens if not shared.is_seq2seq else 0)
-        print(f'Output generated in {(t1-t0):.2f} seconds ({new_tokens/(t1-t0):.2f} tokens/s, {new_tokens} tokens, context {original_tokens}, seed {seed})')
+
+        confidence = -1
+        cc = state.get('confidence_calculator')
+        if cc and output_for_confidence is not None:
+            cc.calculate_confidence(output_for_confidence)
+            confidence = cc.confidence
+        elif output_for_confidence is None:
+            print('Skipping confidence calculation, no output_for_confidence')
+
+        temperature = generate_params.get('temperature')
+        max_new_tokens = generate_params.get('max_new_tokens')
+        print(f'Output generated in {(t1-t0):.2f} seconds ({new_tokens/(t1-t0):.2f} tokens/s, {new_tokens} tokens, context {original_tokens}, seed {seed}, confidence {confidence}, temperature {temperature}, max_new_tokens {max_new_tokens})')  # noqa: E501
         return
 
 

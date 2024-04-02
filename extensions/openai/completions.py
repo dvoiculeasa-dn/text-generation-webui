@@ -5,6 +5,7 @@ import time
 from collections import deque
 from io import BytesIO
 
+import numpy as np
 import requests
 import tiktoken
 import torch
@@ -72,6 +73,31 @@ class LogprobProcessor(LogitsProcessor):
         return f"<{self.__class__.__name__}(logprobs={self.logprobs}, token_alternatives={self.token_alternatives})>"
 
 
+class ConfidenceCalculator():
+    def __init__(self) -> None:
+        self.confidence = -1
+
+    def calculate_confidence(self, output):
+        # outputs['scores'] - the scores for the generated text
+        # outputs['sequences'] - the result the was just outputs before
+        outputs = output
+
+        epsilon = 1e-10
+        conf_scores = []
+        for score in outputs['scores']:
+            probs = F.softmax(score, dim=-1)
+            probs = torch.clamp(probs, min=epsilon, max=1.0)
+
+            entropy = -torch.sum(probs * torch.log(probs), dim=-1)
+
+            # average_entropy = torch.mean(entropy)
+            average_entropy = entropy
+            confidence_score = 1.0 - average_entropy.item()
+            conf_scores.append(confidence_score)
+
+        self.confidence = np.mean(conf_scores)
+
+
 def convert_logprobs_to_tiktoken(model, logprobs):
     # more problems than it's worth.
     # try:
@@ -122,6 +148,8 @@ def process_parameters(body, is_legacy=False):
 
     if logits_processor:  # requires logits_processor support
         generate_params['logits_processor'] = LogitsProcessorList(logits_processor)
+
+    generate_params['confidence_calculator'] = ConfidenceCalculator()
 
     return generate_params
 
@@ -352,6 +380,7 @@ def chat_completions_common(body: dict, is_legacy: bool = False, stream=False) -
 
         yield chunk
     else:
+        confidence = generate_params.pop('confidence_calculator').confidence
         resp = {
             "id": cmpl_id,
             "object": object_type,
@@ -360,7 +389,8 @@ def chat_completions_common(body: dict, is_legacy: bool = False, stream=False) -
             resp_list: [{
                 "index": 0,
                 "finish_reason": stop_reason,
-                "message": {"role": "assistant", "content": answer}
+                "message": {"role": "assistant", "content": answer},
+                "confidence": confidence,
             }],
             "usage": {
                 "prompt_tokens": token_count,
@@ -437,11 +467,15 @@ def completions_common(body: dict, is_legacy: bool = False, stream=False):
             if token_count + completion_token_count >= generate_params['truncation_length'] or completion_token_count >= max_tokens:
                 stop_reason = "length"
 
+            confidence = generate_params.pop('confidence_calculator').confidence
+
+
             respi = {
                 "index": idx,
                 "finish_reason": stop_reason,
                 "text": prefix + answer + suffix,
                 "logprobs": {'top_logprobs': [logprob_proc.token_alternatives]} if logprob_proc else None,
+                "confidence": confidence,
             }
 
             resp_list_data.extend([respi])

@@ -185,6 +185,15 @@ def _apply_custom_js():
     return all_js
 
 
+# def _apply_custom_confidence(function_name, output_data):
+#     result = None
+#     for extension, _ in iterator():
+#         if hasattr(extension, function_name):
+#             result = getattr(extension, function_name)(output_data)
+
+#     return result
+
+
 def create_extensions_block():
     to_display = []
     for extension, name in iterator():
@@ -220,7 +229,8 @@ EXTENSION_MAP = {
     "custom_generate_reply": _apply_custom_generate_reply,
     "tokenized_length": _apply_custom_tokenized_length,
     "css": _apply_custom_css,
-    "js": _apply_custom_js
+    "js": _apply_custom_js,
+    # 'confidence_calculator': partial(_apply_custom_confidence, 'calculate_confidence'),
 }
 
 
