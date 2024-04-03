@@ -90,6 +90,7 @@ def _generate_reply(question, state, stopping_strings=None, is_chat=False, escap
     for reply in generate_func(question, original_question, seed, state, stopping_strings, is_chat=is_chat):
         reply, stop_found = apply_stopping_strings(reply, all_stop_strings)
         # TODO, cleaner. This is just a hack to feed back the confidence
+        # print(f' OS {hex(id(original_state))} OSCC {hex(id(original_state["confidence_calculator"]))} S {hex(id(state))} SCC {hex(id(state.get("confidence_calculator")))}')
         original_state['confidence_calculator'] = state.get('confidence_calculator')
         if escape_html:
             reply = html.escape(reply)
@@ -117,6 +118,10 @@ def _generate_reply(question, state, stopping_strings=None, is_chat=False, escap
 
     if not is_chat:
         reply = apply_extensions('output', reply, state)
+
+    # TODO, cleaner. This is just a hack to feed back the confidence
+    # print(f' OS {hex(id(original_state))} OSCC {hex(id(original_state["confidence_calculator"]))} S {hex(id(state))} SCC {hex(id(state.get("confidence_calculator")))}')
+    original_state['confidence_calculator'] = state.get('confidence_calculator')
 
     yield reply
 
@@ -375,7 +380,12 @@ def generate_reply_HF(question, original_question, seed, state, stopping_strings
         shared.model.save_cache()
 
     t0 = time.time()
-    output_for_confidence = None
+    confidence = -2
+    cc = state.get('confidence_calculator')
+    if cc is not None:
+        print('Using confidence calculator')
+    got_exception = False
+    finished_computation = False
     try:
         if not is_chat and not shared.is_seq2seq:
             print('Yielding empty string')
@@ -391,7 +401,14 @@ def generate_reply_HF(question, original_question, seed, state, stopping_strings
                 output = shared.model.generate(**generate_params)[0]
                 if cuda:
                     output = output.cuda()
+
                 output_for_confidence = output
+                if cc and output_for_confidence is not None:
+                    cc.calculate_confidence(output_for_confidence)
+                    confidence = cc.confidence
+                elif output_for_confidence is None:
+                    print('Skipping confidence calculation, no output_for_confidence')
+                finished_computation = True
 
             starting_from = 0 if shared.is_seq2seq else len(input_ids[0])
             yield get_reply_from_output_ids(output, state, starting_from=starting_from)
@@ -404,11 +421,18 @@ def generate_reply_HF(question, original_question, seed, state, stopping_strings
             generate_params['return_dict_in_generate'] = True
 
             def generate_with_callback(callback=None, *args, **kwargs):
+                nonlocal confidence
+                nonlocal finished_computation
                 kwargs['stopping_criteria'].append(Stream(callback_func=callback))
                 clear_torch_cache()
                 with torch.no_grad():
-                    nonlocal output_for_confidence
                     output_for_confidence = shared.model.generate(**kwargs)
+                    if cc and output_for_confidence is not None:
+                        cc.calculate_confidence(output_for_confidence)
+                        confidence = cc.confidence
+                    elif output_for_confidence is None:
+                        print('Skipping confidence calculation, no output_for_confidence')
+                    finished_computation = True
 
             def generate_with_streaming(**kwargs):
                 return Iteratorize(generate_with_callback, [], kwargs, callback=None)
@@ -430,22 +454,21 @@ def generate_reply_HF(question, original_question, seed, state, stopping_strings
                     yield cumulative_reply
 
     except Exception:
+        got_exception = True
         traceback.print_exc()
     finally:
         t1 = time.time()
         original_tokens = len(original_input_ids[0])
         new_tokens = len(output) - (original_tokens if not shared.is_seq2seq else 0)
 
-        confidence = -1
-        cc = state.get('confidence_calculator')
-        if cc and output_for_confidence is not None:
-            cc.calculate_confidence(output_for_confidence)
-            confidence = cc.confidence
-        elif output_for_confidence is None:
-            print('Skipping confidence calculation, no output_for_confidence')
-
         temperature = generate_params.get('temperature')
         max_new_tokens = generate_params.get('max_new_tokens')
+
+        # Waiting for confidence to be computed
+        if not got_exception:
+            while not finished_computation:
+                time.sleep(0.01)
+
         print(f'Output generated in {(t1-t0):.2f} seconds ({new_tokens/(t1-t0):.2f} tokens/s, {new_tokens} tokens, context {original_tokens}, seed {seed}, confidence {confidence}, temperature {temperature}, max_new_tokens {max_new_tokens})')  # noqa: E501
         return
 
